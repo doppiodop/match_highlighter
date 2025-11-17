@@ -165,7 +165,7 @@ def main():
 
     # Forza Inter button
     if not st.session_state.forza_inter:
-        if st.button("💙🖤 FORZA INTER! 🖤💙"):
+        if st.button("💙🖤 FORZA INTER 🖤💙 (ti voglio bene ale)"):
             st.session_state.forza_inter = True
         else:
             st.info("Premi il pulsante *Forza Inter* per iniziare!")
