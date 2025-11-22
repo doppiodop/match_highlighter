@@ -3,77 +3,66 @@ import os
 import time
 import re
 import shutil
+import tempfile
 from dotenv import load_dotenv
 from google import genai
 from moviepy.editor import VideoFileClip, concatenate_videoclips
 
 load_dotenv()
 
-if os.path.exists("one_minute_videos"):
-    shutil.rmtree("one_minute_videos")
-
 API_KEY = os.getenv("API_KEY")
 
-# ========== ORIGINAL FUNCTIONS ==========
+# ========== NEW LOGIC: SPLIT + PROCESS ON THE FLY ==========
 
-def split_into_one_minute_videos(input_path, output_folder="one_minute_videos"):
-    if os.path.exists(output_folder):
-        shutil.rmtree(output_folder)
-    os.makedirs(output_folder, exist_ok=True)
-
+def generate_and_process_clips(input_path):
+    """
+    Generates 1-minute clips *temporarily*, uploads to Gemini, processes,
+    and deletes the temp file immediately.
+    """
+    client = genai.Client(api_key=API_KEY)
     video = VideoFileClip(input_path)
     duration = int(video.duration)
     chunk_length = 60
 
-    part = 1
-    for start in range(0, duration, chunk_length):
+    responses = []
+
+    for idx, start in enumerate(range(0, duration, chunk_length), start=1):
         end = min(start + chunk_length, duration)
 
-        subclip = video.subclip(start, end)
-        output_path = os.path.join(output_folder, f"part_{part:03d}.mp4")
+        # --- Create temp file for this clip ---
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            temp_path = tmp.name
 
+        # --- Write the clip to a temporary file ---
+        subclip = video.subclip(start, end)
         subclip.write_videofile(
-            output_path,
+            temp_path,
             codec="libx264",
             audio_codec="aac",
-            temp_audiofile=f"temp_audio_{part}.m4a",
+            temp_audiofile=f"temp_audio_{idx}.m4a",
             remove_temp=True,
             verbose=False,
             logger=None
         )
-        part += 1
 
-    video.close()
-    return True
+        # --- Upload to Gemini ---
+        myfile = client.files.upload(file=temp_path)
 
-
-def video_processer():
-    client = genai.Client(api_key=API_KEY)
-    FOLDER = "one_minute_videos"
-
-    clips = sorted([f for f in os.listdir(FOLDER) if f.endswith(".mp4")])
-    responses = []
-
-    for clip in clips:
-        clip_path = os.path.join(FOLDER, clip)
-
-        myfile = client.files.upload(file=clip_path)
-
-        # Wait until ACTIVE
+        # Wait until ACTIVE or FAILED
         while True:
             myfile = client.files.get(name=myfile.name)
-            if myfile.state == "ACTIVE":
-                break
-            if myfile.state == "FAILED":
+            if myfile.state in ("ACTIVE", "FAILED"):
                 break
             time.sleep(3)
 
+        # --- Prompt ---
         prompt = """
-        Tell me the timestamp of a team scoring, be sure that the net moves. It might happen that there is no goal, or more than 1. Return **only** the list of timestamps
+        Tell me the timestamp of a team scoring, be sure that the net moves. It might happen that there is no goal, or more than 1. Return only the list of timestamps
         of goals, something like this: [00:00:12, 00:00:29, ...], in case there is no goal then [].
-        **IMPORTANT**: don't output any other character apart from the list
+        IMPORTANT: don't output any other character apart from the list.
         """
 
+        # --- Call Gemini model ---
         response = None
         for attempt in range(3):
             try:
@@ -90,13 +79,19 @@ def video_processer():
             output_text = response.text.strip()
 
         responses.append({
-            "clip": clip,
+            "clip_number": idx,
             "file_id": myfile.name,
             "response": output_text
         })
 
+        # --- DELETE the temporary clip file ---
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+    video.close()
     return responses
 
+# ========== THE REST OF YOUR ORIGINAL FUNCTIONS (unchanged) ==========
 
 def process_responses(responses):
     def time_to_sec(t):
@@ -154,16 +149,14 @@ def extract_highlights_merged(video_path, timestamps, pre=10, post=10):
     video.close()
     return output_path
 
+# ========== STREAMLIT APP ==========
+
 def main():
     st.title("Match Highlighter")
 
-    # Initialize session state
     if "forza_inter" not in st.session_state:
         st.session_state.forza_inter = False
-    if "start_processing" not in st.session_state:
-        st.session_state.start_processing = False
 
-    # Forza Inter button
     if not st.session_state.forza_inter:
         if st.button("💙🖤 FORZA INTER 🖤💙 (ti voglio bene ale)"):
             st.session_state.forza_inter = True
@@ -181,11 +174,8 @@ def main():
         st.video(input_path)
 
         if st.button("Inizia Elaborazione"):
-            st.write("### Divisione del video in clip da 1 minuto...")
-            split_into_one_minute_videos(input_path)
-
             st.write("### Analisi dei gol con Gemini...")
-            responses = video_processer()
+            responses = generate_and_process_clips(input_path)
 
             st.write("### Unione dei timestamp dei tiri...")
             timestamps = process_responses(responses)
